@@ -125,13 +125,7 @@ func envInit() (err error) {
 		var err error
 		var clang, cflags string
 		switch arch {
-		case "arm":
-			env = append(env, "GOARM=7")
-			fallthrough
-		case "arm64":
-			clang, cflags, err = envClang("iphoneos")
-			cflags += " -miphoneos-version-min=" + buildIOSVersion
-		case "386", "amd64":
+		case "arm64","386", "amd64","arm":
 			clang, cflags, err = envClang("macosx")
 			cflags += " -mmacosx-version-min=10.11"
 		default:
