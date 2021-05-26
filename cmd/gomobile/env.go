@@ -13,6 +13,7 @@ import (
 
 // General mobile build environment. Initialized by envInit.
 var (
+	cwd          string
 	gomobilepath string // $GOPATH/pkg/gomobile
 
 	androidEnv map[string][]string // android arch -> []string
@@ -22,19 +23,8 @@ var (
 	androidArmNM string
 	darwinArmNM  string
 
-	bitcodeEnabled bool
+	allArchs = []string{"arm", "arm64", "386", "amd64"}
 )
-
-func allArchs(targetOS string) []string {
-	switch targetOS {
-	case "ios":
-		return []string{"arm64", "amd64"}
-	case "android":
-		return []string{"arm", "arm64", "386", "amd64"}
-	default:
-		panic(fmt.Sprintf("unexpected target OS: %s", targetOS))
-	}
-}
 
 func buildEnvInit() (cleanup func(), err error) {
 	// Find gomobilepath.
@@ -84,26 +74,15 @@ func buildEnvInit() (cleanup func(), err error) {
 }
 
 func envInit() (err error) {
-	// Check the current Go version by go-list.
-	// An arbitrary standard package ('runtime' here) is given to go-list.
-	// This is because go-list tries to analyze the module at the current directory if no packages are given,
-	// and if the module doesn't have any Go file, go-list fails. See golang/go#36668.
-	cmd := exec.Command("go", "list", "-e", "-f", `{{range context.ReleaseTags}}{{if eq . "go1.14"}}{{.}}{{end}}{{end}}`, "runtime")
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
+	// TODO(crawshaw): cwd only used by ctx.Import, which can take "."
+	cwd, err = os.Getwd()
 	if err != nil {
 		return err
-	}
-	if len(strings.TrimSpace(string(out))) > 0 {
-		bitcodeEnabled = true
 	}
 
 	// Setup the cross-compiler environments.
 	if ndkRoot, err := ndkRoot(); err == nil {
 		androidEnv = make(map[string][]string)
-		if buildAndroidAPI < minAndroidAPI {
-			return fmt.Errorf("gomobile requires Android API level >= %d", minAndroidAPI)
-		}
 		for arch, toolchain := range ndk {
 			clang := toolchain.Path(ndkRoot, "clang")
 			clangpp := toolchain.Path(ndkRoot, "clang++")
@@ -141,26 +120,26 @@ func envInit() (err error) {
 
 	darwinArmNM = "nm"
 	darwinEnv = make(map[string][]string)
-	for _, arch := range allArchs("ios") {
+	for _, arch := range allArchs {
 		var env []string
 		var err error
 		var clang, cflags string
 		switch arch {
+		case "arm":
+			env = append(env, "GOARM=7")
+			fallthrough
 		case "arm64":
 			clang, cflags, err = envClang("iphoneos")
 			cflags += " -miphoneos-version-min=" + buildIOSVersion
 		case "386", "amd64":
 			clang, cflags, err = envClang("macosx")
-			cflags += " -mmacosx-version-min=10.13"
+			cflags += " -mmacosx-version-min=10.11"
 		default:
 			panic(fmt.Errorf("unknown GOARCH: %q", arch))
 		}
+		cflags += " -fembed-bitcode"
 		if err != nil {
 			return err
-		}
-
-		if bitcodeEnabled {
-			cflags += " -fembed-bitcode"
 		}
 		env = append(env,
 			"GOOS=darwin",
@@ -182,25 +161,16 @@ func ndkRoot() (string, error) {
 	if buildN {
 		return "$NDK_PATH", nil
 	}
-
 	androidHome := os.Getenv("ANDROID_HOME")
-	if androidHome != "" {
-		ndkRoot := filepath.Join(androidHome, "ndk-bundle")
-		_, err := os.Stat(ndkRoot)
-		if err == nil {
-			return ndkRoot, nil
-		}
+	if androidHome == "" {
+		return "", errors.New("The Android SDK was not found. Please set ANDROID_HOME to the root of the Android SDK.")
 	}
-
-	ndkRoot := os.Getenv("ANDROID_NDK_HOME")
-	if ndkRoot != "" {
-		_, err := os.Stat(ndkRoot)
-		if err == nil {
-			return ndkRoot, nil
-		}
+	ndkRoot := filepath.Join(androidHome, "ndk-bundle")
+	_, err := os.Stat(ndkRoot)
+	if err != nil {
+		return "", fmt.Errorf("The NDK was not found in $ANDROID_HOME/ndk-bundle (%q). Install the NDK with `sdkmanager 'ndk-bundle'`", ndkRoot)
 	}
-
-	return "", fmt.Errorf("no Android NDK found in $ANDROID_HOME/ndk-bundle nor in $ANDROID_NDK_HOME")
+	return ndkRoot, nil
 }
 
 func envClang(sdkName string) (clang, cflags string, err error) {
@@ -304,23 +274,15 @@ func archNDK() string {
 type ndkToolchain struct {
 	arch        string
 	abi         string
-	minAPI      int
 	toolPrefix  string
 	clangPrefix string
-}
-
-func (tc *ndkToolchain) ClangPrefix() string {
-	if buildAndroidAPI < tc.minAPI {
-		return fmt.Sprintf("%s%d", tc.clangPrefix, tc.minAPI)
-	}
-	return fmt.Sprintf("%s%d", tc.clangPrefix, buildAndroidAPI)
 }
 
 func (tc *ndkToolchain) Path(ndkRoot, toolName string) string {
 	var pref string
 	switch toolName {
 	case "clang", "clang++":
-		pref = tc.ClangPrefix()
+		pref = tc.clangPrefix
 	default:
 		pref = tc.toolPrefix
 	}
@@ -341,31 +303,27 @@ var ndk = ndkConfig{
 	"arm": {
 		arch:        "arm",
 		abi:         "armeabi-v7a",
-		minAPI:      16,
 		toolPrefix:  "arm-linux-androideabi",
-		clangPrefix: "armv7a-linux-androideabi",
+		clangPrefix: "armv7a-linux-androideabi16",
 	},
 	"arm64": {
 		arch:        "arm64",
 		abi:         "arm64-v8a",
-		minAPI:      21,
 		toolPrefix:  "aarch64-linux-android",
-		clangPrefix: "aarch64-linux-android",
+		clangPrefix: "aarch64-linux-android21",
 	},
 
 	"386": {
 		arch:        "x86",
 		abi:         "x86",
-		minAPI:      16,
 		toolPrefix:  "i686-linux-android",
-		clangPrefix: "i686-linux-android",
+		clangPrefix: "i686-linux-android16",
 	},
 	"amd64": {
 		arch:        "x86_64",
 		abi:         "x86_64",
-		minAPI:      21,
 		toolPrefix:  "x86_64-linux-android",
-		clangPrefix: "x86_64-linux-android",
+		clangPrefix: "x86_64-linux-android21",
 	},
 }
 
